@@ -5,6 +5,6 @@
 
 
 
-3,   command de complier: $ g++ @@@.cpp `pkg-config --libs --cflags opencv` -o ### -framework OpenCL
+3,   command de complier: $ g++ @@@.cpp (ajouter un points ici)`pkg-config --libs --cflags opencv`(ajouter un points ici) -o ### -framework OpenCL
 
 4,   command d'execution: $ ./### ***.jpg
