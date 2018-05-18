@@ -210,9 +210,9 @@ cl_mem LoadImage(cl_context context, std::string fileName, int &width, int &heig
     
     cl_int errNum;
     cl_mem clImage = clCreateImage(context,
-                            CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
-                            &clImageFormat,&clImageDesc,
-                            buffer,&errNum);
+                                   CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                                   &clImageFormat,&clImageDesc,
+                                   buffer,&errNum);
     
     if (0 == clImage || CL_SUCCESS != errNum){
         std::cerr << "Error creating CL image object" << std::endl;
@@ -252,26 +252,6 @@ size_t RoundUp(int groupSize, int globalSize){
         return globalSize + groupSize - r;
     }
 }
-
-void initTable(char* table16){
-    table16[0] = '0';
-    table16[1] = '1';
-    table16[2] = '2';
-    table16[3] = '3';
-    table16[4] = '4';
-    table16[5] = '5';
-    table16[6] = '6';
-    table16[7] = '7';
-    table16[8] = '8';
-    table16[9] = '9';
-    table16[10] = 'a';
-    table16[11] = 'b';
-    table16[12] = 'c';
-    table16[13] = 'd';
-    table16[14] = 'e';
-    table16[15] = 'f';
-}
-
 int main(int argc, char** argv){
     cl_context context = 0;
     
@@ -324,7 +304,7 @@ int main(int argc, char** argv){
     cl_image_desc desc;
     //设置输出图片大小
     //工作组的大小
-    size_t resiTaill = 8;
+    size_t resiTaill = 10;
     memset(&desc, 0, sizeof(desc));
     desc.image_height = resiTaill;
     desc.image_width = resiTaill;
@@ -352,7 +332,7 @@ int main(int argc, char** argv){
     }
     
     // 创建函数项
-    string cl_kernel_file = "./exemple.cl";//./exempleOpenCL/exemple.cl";//OpenCL file path
+    string cl_kernel_file = "./exemple.cl";//OpenCL file path
     program = CreateProgram(context, device, cl_kernel_file);
     if (program == NULL) {
         Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
@@ -370,40 +350,27 @@ int main(int argc, char** argv){
     }
     size_t workgroup_size;
     errNum = clGetKernelWorkGroupInfo(kernel, device, CL_KERNEL_WORK_GROUP_SIZE,
-                                   sizeof(size_t), &workgroup_size, NULL);
+                                      sizeof(size_t), &workgroup_size, NULL);
     printf("KERNEL WORK GROUP SIZE is %ld\n",workgroup_size);
     
     
     //float* result = (float*)malloc(sizeof(float)*resiTaill * resiTaill);
     cl_mem memObjectResult = clCreateBuffer(context,
-                                  CL_MEM_READ_WRITE,
-                                  sizeof(float)*resiTaill * resiTaill, NULL, NULL);
-    
-    int sizetable_16 = 16;
-    char* table_16 = (char*)malloc(sizeof(char)*sizetable_16);
-    initTable(table_16);
-    
-//    for(int i = 0; i < sizetable_16; i++){
-//        printf("====code number %d---- is %c\n",i,table_16[i]);
-//    }
-    
-    cl_mem memTableRef = clCreateBuffer(context,
-                                            CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
-                                            sizeof(char)*sizetable_16, table_16, NULL);
+                                            CL_MEM_READ_WRITE,
+                                            sizeof(float)*resiTaill * resiTaill, NULL, NULL);
     
     
-    char* ImageCode = (char*)malloc(sizeof(char)*resiTaill*resiTaill/4);
+    char* ImageCode = (char*)malloc(sizeof(char)*resiTaill*resiTaill);
     cl_mem memImageCode = clCreateBuffer(context,
-                                        CL_MEM_READ_WRITE,
-                                        sizeof(char)*resiTaill*resiTaill/4, NULL, NULL);
+                                         CL_MEM_READ_WRITE,
+                                         sizeof(char)*resiTaill*resiTaill, NULL, NULL);
     
     
     // 传入参数
     errNum = clSetKernelArg(kernel, 0, sizeof(cl_mem), &imageObjects[0]);
     errNum |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &imageObjects[1]);
     errNum |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &memObjectResult);
-    errNum |= clSetKernelArg(kernel, 3, sizeof(cl_mem), &memTableRef);
-    errNum |= clSetKernelArg(kernel, 4, sizeof(cl_mem), &memImageCode);
+    errNum |= clSetKernelArg(kernel, 3, sizeof(cl_mem), &memImageCode);
     if (errNum != CL_SUCCESS) {
         cerr << "Error setting kernel arguments." << endl;
         Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
@@ -414,7 +381,7 @@ int main(int argc, char** argv){
     size_t globalWorkSize[2] = {resiTaill,resiTaill};
     //开始运算
     clock_t t1 = clock();
-    clock_t t2;
+    
     errNum = clEnqueueNDRangeKernel(commandQueue, kernel,
                                     2, NULL,
                                     globalWorkSize, localWorkSize,
@@ -427,36 +394,57 @@ int main(int argc, char** argv){
         return 1;
     }
     
-    // Read the output buffer back to the Host
-    cv::Mat imageColor1 = cv::imread(src0);
-    cv::Mat imageColor2;
-    imageColor2.create((int)resiTaill, (int)resiTaill, imageColor1.type());
-
-    char *buffer = new char[resiTaill * resiTaill * 4];
-    size_t origin[3] = { 0, 0, 0 };
-    size_t region[3] = { resiTaill, resiTaill, 1 };
-    errNum = clEnqueueReadImage(commandQueue, imageObjects[1], CL_TRUE,
-                                origin, region, 0, 0, buffer,
-                                0, NULL, NULL);
-    
-    if (errNum != CL_SUCCESS) {
-        cerr << "Error reading result buffer." << endl;
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-        cin.get();
-        return 1;
-    }
+    // Read the output image back to the Host
+    //    cv::Mat imageColor1 = cv::imread(src0);
+    //    cv::Mat imageColor2;
+    //    imageColor2.create((int)resiTaill, (int)resiTaill, imageColor1.type());
+    //
+    //    char *buffer = new char[resiTaill * resiTaill * 4];
+    //    size_t origin[3] = { 0, 0, 0 };
+    //    size_t region[3] = { resiTaill, resiTaill, 1 };
+    //    errNum = clEnqueueReadImage(commandQueue, imageObjects[1], CL_TRUE,
+    //                                origin, region, 0, 0, buffer,
+    //                                0, NULL, NULL);
+    //    if (errNum != CL_SUCCESS) {
+    //        cerr << "Error reading result buffer." << endl;
+    //        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
+    //        cin.get();
+    //        return 1;
+    //    }
     
     //计算机结果拷贝回主机
-    errNum = clEnqueueReadBuffer(commandQueue, memImageCode, CL_TRUE, 0, sizeof(char)*(resiTaill*resiTaill/4),
+    errNum = clEnqueueReadBuffer(commandQueue, memImageCode, CL_TRUE, 0, sizeof(char)*(resiTaill*resiTaill),
                                  ImageCode, 0, NULL, NULL);
     if (errNum != CL_SUCCESS) {
         printf("Error reading result buffer.");
         Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
         return 1;
     }
-    t2 = clock();
+    clock_t t2 = clock();
+    cout << "OpenCL - BGR2GRAY:----" << t2 - t1 << "ms" << endl;
     //输出内核计算后的结构
-    printf("%s\n",ImageCode);
     
+    for (int i = resiTaill * resiTaill -1; i >= 0; i--) {
+        printf("%c",ImageCode[i]);
+    }
+    printf("\n");
+    
+    
+    
+    //    int w = 0;
+    //    for (int v = imageColor2.rows - 1; v >= 0; v--){
+    //        for (int u = 0; u <imageColor2.cols; u++){
+    //            imageColor2.at<cv::Vec3b>(v, u)[0] = buffer[w++];
+    //            imageColor2.at<cv::Vec3b>(v, u)[1] = buffer[w++];
+    //            imageColor2.at<cv::Vec3b>(v, u)[2] = buffer[w++];
+    //            w++;
+    //        }
+    //    }
+    //    cv::imshow("OpenCL-BGR2GRAY", imageColor2);
+    //    cv::waitKey(0);
+    //    delete[] buffer;
+    
+    Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
     return 0;
 }
+
