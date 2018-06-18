@@ -6,8 +6,16 @@
 //  Copyright © 2018年 zijiang yang. All rights reserved.
 //
 
-#include <iostream>
-#include <opencv2/opencv.hpp>
+#include <sys/types.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <string>
+#include <vector>
+
+#include<opencv2/opencv.hpp>
+#include<opencv2/core/ocl.hpp>
+#include<FreeImage.h>
+#include<FreeImagePlus.h>
 
 #ifdef __APPLE__
 #include "OpenCL/cl.h"
@@ -17,7 +25,9 @@
 
 using namespace cv;
 using namespace std;
-
+clock_t t_transmettre;
+clock_t t_calcule;
+clock_t t_lecture;
 
 cl_context CreateContext(){
     cl_int errNum;
@@ -27,6 +37,7 @@ cl_context CreateContext(){
     
     // 选择OpenCL平台
     errNum = clGetPlatformIDs(0, NULL, &numPlatforms);
+    
     platform = (cl_platform_id*)malloc(sizeof(cl_platform_id)*numPlatforms);
     
     errNum = clGetPlatformIDs(numPlatforms, platform, NULL);
@@ -34,17 +45,7 @@ cl_context CreateContext(){
         printf("fail to find any OpenCL platform");
         return NULL;
     }
-    //获取平台信息
-    for (int i = 0; i < numPlatforms; i++) {
-        size_t size;
-        
-        errNum = clGetPlatformInfo(platform[i], CL_PLATFORM_VERSION, 0, NULL, &size);
-        char *PInfo = (char*)malloc(size);
-        errNum = clGetPlatformInfo(platform[i], CL_PLATFORM_VERSION, size, PInfo, NULL);
-        
-        printf("PlatFormInfo : %s\n",PInfo);
-        free(PInfo);
-    }
+    
     //获得平台设备,使用GPU作为平台设备
     cl_uint num_device;
     cl_device_id *device;
@@ -60,21 +61,12 @@ cl_context CreateContext(){
         printf("there is no GPU and CPU...");
         return NULL;
     }
-    for (int i =0; i <num_device; i++) {
-        size_t UnitNumber[3];
-        clGetDeviceInfo(device[i], CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof(size_t)*3, UnitNumber, NULL);
-        for(int i = 0; i< 3; i++){
-            printf("device max work group size in dimention %d is : %ld\n",i,UnitNumber[i]);
-        }
-        
-    }
     
     // 在OpenCL平台上创建一个队列，先试GPU，再试CPU
-    cl_context_properties contextProperties[] ={
+    cl_context_properties contextProperties[] = {
         CL_CONTEXT_PLATFORM,
-        (cl_context_properties)(*platform),
-        0
-    };
+        (cl_context_properties)(*platform),0};
+    
     context = clCreateContextFromType(contextProperties,
                                       CL_DEVICE_TYPE_GPU,
                                       NULL, NULL, &errNum);
@@ -88,7 +80,6 @@ cl_context CreateContext(){
             return NULL;
         }
     }
-    
     return context;
 }
 
@@ -118,10 +109,10 @@ cl_command_queue CreateCommandQueue(cl_context context, cl_device_id *device){
         return NULL;
     }
     
-    // In this example, we just choose the first available device.  In a
+    // In this example, we just choose the first available device. In a
     // real program, you would likely use all available devices or choose
     // the highest performance device based on OpenCL device queries
-    commandQueue = clCreateCommandQueue(context, devices[0], 0, NULL);
+    commandQueue = clCreateCommandQueue(context, devices[0], 0, &errNum);
     if (commandQueue == NULL){
         std::cerr << "Failed to create commandQueue for device 0";
         return NULL;
@@ -171,32 +162,13 @@ cl_program CreateProgram(cl_context context, cl_device_id device, std::string fi
     return program;
 }
 
-cl_bool ImageSupport(cl_device_id device) {
-    cl_bool imageSupport = CL_FALSE;
-    clGetDeviceInfo(device, CL_DEVICE_IMAGE_SUPPORT, sizeof(cl_bool),
-                    &imageSupport, NULL);
-    return imageSupport;
-}
-
 cl_mem LoadImage(cl_context context, std::string fileName, int &width, int &height){
+    
     
     cv::Mat imageSrc = cv::imread(fileName);
     width = imageSrc.cols;
     height = imageSrc.rows;
-    char *buffer = new char[width * height * 4];
-    
-    //数据传入方式：一个像素一个像素，按照B G R顺序，中间空一格 就像：
-    // 12 237 34  221 88 99  22 33 99
-    int w = 0;
-    for (int v = height - 1; v >= 0; v--){
-        for (int u = 0; u <width; u++){
-            buffer[w++] = imageSrc.at<cv::Vec3b>(v, u)[0];
-            buffer[w++] = imageSrc.at<cv::Vec3b>(v, u)[1];
-            buffer[w++] = imageSrc.at<cv::Vec3b>(v, u)[2];
-            w++;
-        }
-    }
-    
+   
     // Create OpenCL image
     cl_image_format clImageFormat;
     clImageFormat.image_channel_order = CL_RGBA;
@@ -210,9 +182,9 @@ cl_mem LoadImage(cl_context context, std::string fileName, int &width, int &heig
     
     cl_int errNum;
     cl_mem clImage = clCreateImage(context,
-                                   CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
-                                   &clImageFormat,&clImageDesc,
-                                   buffer,&errNum);
+                            CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                            &clImageFormat,&clImageDesc,
+                            imageSrc.ptr(),&errNum);
     
     if (0 == clImage || CL_SUCCESS != errNum){
         std::cerr << "Error creating CL image object" << std::endl;
@@ -221,90 +193,76 @@ cl_mem LoadImage(cl_context context, std::string fileName, int &width, int &heig
     return clImage;
 }
 
-void Cleanup(cl_context context, cl_command_queue commandQueue,
-             cl_program program, cl_kernel kernel,
-             cl_mem imageObjects[2], cl_sampler sampler) {
-    for (int i = 0; i < 2; i++) {
-        if (imageObjects[i] != 0)
-            clReleaseMemObject(imageObjects[i]);
-    }
+void Cleanup(cl_context context, cl_device_id device, cl_program program,
+             cl_command_queue commandQueue, cl_kernel kernel) {
     if (commandQueue != 0)
         clReleaseCommandQueue(commandQueue);
-    
     if (kernel != 0)
         clReleaseKernel(kernel);
-    
     if (program != 0)
         clReleaseProgram(program);
-    
-    if (sampler != 0)
-        clReleaseSampler(sampler);
-    
+    if (device != 0)
+        clReleaseDevice(device);
     if (context != 0)
         clReleaseContext(context);
 }
 
-size_t RoundUp(int groupSize, int globalSize){
-    int r = globalSize % groupSize;
-    if (r == 0){
-        return globalSize;
-    } else {
-        return globalSize + groupSize - r;
-    }
-}
-int main(int argc, char** argv){
+cl_context platFormeInial(cl_command_queue& commandQueue, cl_kernel& kernel){
     cl_context context = 0;
-    
-    cl_program program = 0;
     cl_device_id device = 0;
-    cl_kernel kernel = 0;
-    cl_mem imageObjects[3] = { 0, 0, 0 }; //一个原图像 一个目标图像
-    cl_sampler sampler = 0;
-    cl_int errNum;
+    cl_program program = 0;
     
     // get the device
     context = CreateContext();
     if (context == NULL) {
+        Cleanup(context,device,program,commandQueue,kernel);
         cerr << "Failed to create OpenCL context." << endl;
         cin.get();
+        return NULL;
     }
     
-    // 创建队列
-    cl_command_queue commandQueue = 0;
+    // creat command queue
     commandQueue = CreateCommandQueue(context, &device);
     if (commandQueue == NULL) {
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
+        Cleanup(context,device,program,commandQueue,kernel);
+        cerr << "Failed to create OpenCL commande et device." << endl;
         cin.get();
-        return 1;
+        return NULL;
     }
     
-    // is the device support this image.
-    if (ImageSupport(device) != CL_TRUE){
-        cerr << "OpenCL device does not support images." << endl;
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
+    // creat kernel program
+    string cl_kernel_file = "./exemple.cl";//OpenCL file path
+    program = CreateProgram(context, device, cl_kernel_file);
+    if (program == NULL) {
+        Cleanup(context,device,program,commandQueue,kernel);
+        cerr << "Failed to create OpenCL commande et device." << endl;
         cin.get();
-        return 1;
+        return NULL;
     }
     
-    // 将图片载入OpenCL设备
-    int width, height; //在LoadImage函数改变了其值
-    string src0 = argv[1];//"./exempleOpenCL/myimage.jpg";
-    imageObjects[0] = LoadImage(context, src0, width, height);
-    if (imageObjects[0] == 0){
-        cerr << "Error loading: " << string(src0) << endl;
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
+    //creat kernel foction
+    kernel = clCreateKernel(program, "bgr2gray", NULL);
+    if (kernel == NULL) {
+        Cleanup(context,device,program,commandQueue,kernel);
+        cerr << "Failed to create OpenCL commande et device." << endl;
         cin.get();
-        return 1;
+        return NULL;
     }
+    return context;
+}
+
+cl_int InitialImageObjet(cl_context context,cl_mem *imageObjects,size_t resiTaill,
+                         cl_mem& memObjectResult,cl_mem& memImageCode){
+    cl_int errNum;
+    //cl_mem imageObjects[2] = {0, 0}; //一个原图像 一个目标图像
     
     // 目标图像（缩小处理得到的）
     cl_image_format clImageFormat;
     clImageFormat.image_channel_order = CL_RGBA;
     clImageFormat.image_channel_data_type = CL_UNORM_INT8;
     cl_image_desc desc;
+    
     //设置输出图片大小
-    //工作组的大小
-    size_t resiTaill = 10;
     memset(&desc, 0, sizeof(desc));
     desc.image_height = resiTaill;
     desc.image_width = resiTaill;
@@ -312,139 +270,149 @@ int main(int argc, char** argv){
     imageObjects[1] = clCreateImage(context,CL_MEM_READ_WRITE,
                                     &clImageFormat, &desc,
                                     NULL, &errNum);
-    if (errNum != CL_SUCCESS){
-        cerr << "Error creating CL output image object." << endl;
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-        return 1;
-    }
-    
-    // Create sampler for sampling image object
-    sampler = clCreateSampler(context,
-                              CL_FALSE, // Non-normalized coordinates
-                              CL_ADDRESS_CLAMP_TO_EDGE,
-                              CL_FILTER_NEAREST,
-                              &errNum);
-    
-    if (errNum != CL_SUCCESS) {
-        cerr << "Error creating CL sampler object." << endl;
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-        return 1;
-    }
-    
-    // 创建函数项
-    string cl_kernel_file = "./exemple.cl";//OpenCL file path
-    program = CreateProgram(context, device, cl_kernel_file);
-    if (program == NULL) {
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-        cin.get();
-        return 1;
-    }
-    
-    //创建一个OpenCL中的函数
-    kernel = clCreateKernel(program, "bgr2gray", NULL);
-    if (kernel == NULL) {
-        cerr << "Failed to create kernel" << endl;
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-        cin.get();
-        return 1;
-    }
-    size_t workgroup_size;
-    errNum = clGetKernelWorkGroupInfo(kernel, device, CL_KERNEL_WORK_GROUP_SIZE,
-                                      sizeof(size_t), &workgroup_size, NULL);
-    printf("KERNEL WORK GROUP SIZE is %ld\n",workgroup_size);
-    
-    
     //float* result = (float*)malloc(sizeof(float)*resiTaill * resiTaill);
-    cl_mem memObjectResult = clCreateBuffer(context,
+    memObjectResult = clCreateBuffer(context,
                                             CL_MEM_READ_WRITE,
                                             sizeof(float)*resiTaill * resiTaill, NULL, NULL);
     
-    
-    char* ImageCode = (char*)malloc(sizeof(char)*resiTaill*resiTaill);
-    cl_mem memImageCode = clCreateBuffer(context,
+    memImageCode = clCreateBuffer(context,
                                          CL_MEM_READ_WRITE,
                                          sizeof(char)*resiTaill*resiTaill, NULL, NULL);
-    
-    
-    // 传入参数
-    errNum = clSetKernelArg(kernel, 0, sizeof(cl_mem), &imageObjects[0]);
-    errNum |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &imageObjects[1]);
-    errNum |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &memObjectResult);
-    errNum |= clSetKernelArg(kernel, 3, sizeof(cl_mem), &memImageCode);
-    if (errNum != CL_SUCCESS) {
-        cerr << "Error setting kernel arguments." << endl;
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-        return 1;
-    }
-    
-    size_t localWorkSize[2] = {resiTaill,resiTaill};
-    size_t globalWorkSize[2] = {resiTaill,resiTaill};
-    //开始运算
-    clock_t t1 = clock();
-    
-    errNum = clEnqueueNDRangeKernel(commandQueue, kernel,
-                                    2, NULL,
-                                    globalWorkSize, localWorkSize,
-                                    0, NULL, NULL);
-    
-    if (errNum != CL_SUCCESS){
-        cerr << "Error queuing kernel for execution." << endl;
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-        cin.get();
-        return 1;
-    }
-    
-    // Read the output image back to the Host
-    //    cv::Mat imageColor1 = cv::imread(src0);
-    //    cv::Mat imageColor2;
-    //    imageColor2.create((int)resiTaill, (int)resiTaill, imageColor1.type());
-    //
-    //    char *buffer = new char[resiTaill * resiTaill * 4];
-    //    size_t origin[3] = { 0, 0, 0 };
-    //    size_t region[3] = { resiTaill, resiTaill, 1 };
-    //    errNum = clEnqueueReadImage(commandQueue, imageObjects[1], CL_TRUE,
-    //                                origin, region, 0, 0, buffer,
-    //                                0, NULL, NULL);
-    //    if (errNum != CL_SUCCESS) {
-    //        cerr << "Error reading result buffer." << endl;
-    //        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-    //        cin.get();
-    //        return 1;
-    //    }
-    
-    //计算机结果拷贝回主机
-    errNum = clEnqueueReadBuffer(commandQueue, memImageCode, CL_TRUE, 0, sizeof(char)*(resiTaill*resiTaill),
-                                 ImageCode, 0, NULL, NULL);
-    if (errNum != CL_SUCCESS) {
-        printf("Error reading result buffer.");
-        Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-        return 1;
-    }
-    clock_t t2 = clock();
-    cout << "OpenCL - BGR2GRAY:----" << t2 - t1 << "ms" << endl;
-    //输出内核计算后的结构
-    
-    for (int i = resiTaill * resiTaill -1; i >= 0; i--) {
-        printf("%c",ImageCode[i]);
-    }
-    printf("\n");
-    
-    
-    
-    //    int w = 0;
-    //    for (int v = imageColor2.rows - 1; v >= 0; v--){
-    //        for (int u = 0; u <imageColor2.cols; u++){
-    //            imageColor2.at<cv::Vec3b>(v, u)[0] = buffer[w++];
-    //            imageColor2.at<cv::Vec3b>(v, u)[1] = buffer[w++];
-    //            imageColor2.at<cv::Vec3b>(v, u)[2] = buffer[w++];
-    //            w++;
-    //        }
-    //    }
-    //    cv::imshow("OpenCL-BGR2GRAY", imageColor2);
-    //    cv::waitKey(0);
-    //    delete[] buffer;
-    
-    Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-    return 0;
+    return errNum;
 }
 
+void ReadFileNameInFile(string sfilePicture,vector<string>& fileList){
+    DIR* dir;
+    struct dirent* ptr;
+    dir = opendir(sfilePicture.c_str());
+    while((ptr = readdir(dir)) != NULL){
+        if(strcmp(ptr->d_name,".") != 0 && strcmp(ptr->d_name,"..") != 0){
+            //cout<<"filename = "<<ptr->d_name<<endl;
+            if(strcmp(ptr->d_name,".DS_Store") != 0){
+                fileList.push_back(ptr->d_name);
+            }
+        }
+    }
+    
+    closedir(dir);
+}
+
+cl_int traitImage(cl_context context,cl_command_queue &commandQueue,cl_kernel &kernel,string sfilePicture){
+    
+    size_t resiTaill = 10; //size de image genere heith = withe
+    cl_mem imageObjects[2] = {0, 0};
+    cl_mem memObjectResult;
+    cl_mem memImageCode;
+    //initiale les buffer de image
+    cl_int errNum = InitialImageObjet(context,imageObjects,resiTaill,memObjectResult,memImageCode);
+    if (errNum != CL_SUCCESS){
+        Cleanup(context,NULL,NULL,commandQueue,kernel);
+        cerr << "Error creating CL output image object." << endl;
+        return errNum;
+    }
+    
+    vector<string> fileList;
+    ReadFileNameInFile(sfilePicture,fileList);
+    
+    //boucle pour traiter image
+    for(int i_image = 0; i_image < fileList.size(); i_image++){
+        int width, height;
+        clock_t t1,t2,t3,t4;
+        string fileJpgName = fileList.at(i_image);
+        string src0 = sfilePicture+ fileJpgName;
+        clock_t t_lecture1 = clock();//Horodatages lecture begin
+        imageObjects[0] = LoadImage(context, src0, width, height);
+        clock_t t_lecture2 = clock();;//Horodatages lecture end
+        t_lecture = t_lecture + (t_lecture2 - t_lecture1);
+        if (imageObjects[0] == 0){
+            cerr << "Error loading: " << string(src0) << endl;
+            Cleanup(context,NULL,NULL,commandQueue,kernel);
+            cin.get();
+            return errNum;
+        }
+        t1 = clock();//Horodatages1
+        // 传入参数
+        errNum = clSetKernelArg(kernel, 0, sizeof(cl_mem), &imageObjects[0]);
+        errNum |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &imageObjects[1]);
+        errNum |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &memObjectResult);
+        errNum |= clSetKernelArg(kernel, 3, sizeof(cl_mem), &memImageCode);
+        if (errNum != CL_SUCCESS) {
+            cerr << "Error setting kernel arguments." << endl;
+            Cleanup(context,NULL,NULL,commandQueue,kernel);
+            cin.get();
+            return errNum;
+        }
+        t2 = clock();//Horodatages2
+        size_t globalWorkSize[2] = {resiTaill,resiTaill};
+        errNum = clEnqueueNDRangeKernel(commandQueue, kernel,
+                                        2, NULL,
+                                        globalWorkSize, NULL,
+                                        0, NULL, NULL);
+        
+        if (errNum != CL_SUCCESS){
+            cerr << "Error queuing kernel for execution." << endl;
+            Cleanup(context,NULL,NULL,commandQueue,kernel);
+            cin.get();
+            return errNum;
+        }
+        t3 = clock();//Horodatages3
+        //计算机结果拷贝回主机
+        char* ImageCode = (char*)malloc(sizeof(char)*resiTaill*resiTaill);
+        errNum = clEnqueueReadBuffer(commandQueue, memImageCode, CL_TRUE, 0, sizeof(char)*(resiTaill*resiTaill),
+                                     ImageCode, 0, NULL, NULL);
+        if (errNum != CL_SUCCESS) {
+            printf("Error reading result buffer.");
+            Cleanup(context,NULL,NULL,commandQueue,kernel);
+            cin.get();
+            return errNum;
+        }
+        t4 = clock();//Horodatages4
+        t_transmettre = t_transmettre + (t2 - t1)+(t4 - t3);
+        t_calcule = t_calcule+ (t3 - t2);
+        //resault of image code
+//        for (long i = resiTaill * resiTaill -1; i >= 0; i--) {
+//            printf("%c",ImageCode[i]);
+//        }
+//        printf("\n");
+        
+    }
+    return errNum;
+}
+
+int main(int argc, char** argv){
+    
+    cl_context my_context = 0;
+    cl_command_queue my_commandQueue = 0;
+    cl_kernel my_kernel = 0;
+    //create plat-forme
+    my_context = platFormeInial(my_commandQueue,my_kernel);
+    
+    //string srcPicFile = "./picture1/";
+    string srcPicFile = argv[1];
+    
+    //traitement d'image
+    cl_int errNum = traitImage(my_context,my_commandQueue,my_kernel,srcPicFile);
+    
+    if (errNum != CL_SUCCESS) {
+        printf("program is Error");
+        Cleanup(my_context,NULL,NULL,my_commandQueue,my_kernel);
+    }
+    //show the diffrents time
+    if (argv[2] != NULL) {
+        string srcTimeType(argv[2]);
+        string strtrans ="trans";
+        string srccacul ="calcul";
+        string srclecture ="lecture";
+        if (srcTimeType == strtrans) {
+            cout<<"transition time: "<<static_cast<double>(t_transmettre)/CLOCKS_PER_SEC*1000<<"ms"<<endl;
+        }
+        if (srcTimeType == srccacul) {
+            cout<<"calcul time: "<<static_cast<double>(t_calcule)/CLOCKS_PER_SEC*1000<<"ms"<<endl;
+        }
+        if (srcTimeType == srclecture) {
+            cout<<"lecture time: "<<static_cast<double>(t_lecture)/CLOCKS_PER_SEC*1000<<"ms"<<endl;
+        }
+    }
+    
+    return 0;
+}
